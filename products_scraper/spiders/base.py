@@ -29,6 +29,7 @@ class BaseSpider(Spider):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.is_mpb_product_scraper = False
         self.start_time = datetime.utcnow()
         self.total_results = None
         self.duplicate_skipped_counter = 0
@@ -41,17 +42,25 @@ class BaseSpider(Spider):
         self.email_obj = self.build_connection_with_gmail()  # Login to Gmail with app password
 
         #output filenames
-        self.mpb_notes_filename = f'mpb_products_notes.csv'
-        self.output_filename = f'output/{self.name}/{self.name}_products_{datetime.now().strftime("%d%m%Y%H%M")}.json'
+        self.mpb_notes_filename = f'mpb_variants_notes.csv'
+        self.output_filename = f'output/{self.name}/{self.name}_{datetime.now().strftime("%d%m%Y%H%M")}.json'
+        self.mpb_specifications_filename = f'mpb_products_specifications.csv'
+
         self.failed_pages_status = []
 
         #seen products and skus
-        self.seen_product_notes_items = {row.get('sku'): row.get('notes') for row in self.read_csv_file() if row.get('sku')}
+        self.seen_product_notes_items = {row.get('sku'): row.get('notes') for row in self.read_csv_file(self.mpb_notes_filename) if row.get('sku')}
         self.seen_product_notes_skus = set(self.seen_product_notes_items.keys())
+
+        self.seen_product_specifications_items = {row.get('model_url'): row.get('specifications') for row in self.read_csv_file(self.mpb_specifications_filename) if row.get('model_url')}
+        self.seen_product_specifications_url = set(self.seen_product_specifications_items.keys())
 
         self.seen_product_urls = []
         self.current_scrapped_items = []
+        self.out_of_stock_scrapped_items = []
         self.failed_pages = 0
+
+        self.playwright_meta = {"playwright": True,"playwright_page_methods": [("wait_for_load_state", "networkidle"),],}
 
     def start_requests(self):
         pass
@@ -59,7 +68,7 @@ class BaseSpider(Spider):
     def parse(self, response, **kwargs):
         pass
 
-    def fetch_product_url_response(self, url, max_retries=3, timeout=60):
+    def fetch_product_url_response(self, url, max_retries=3, timeout=60, headers=None):
         """
         Fetch a URL using curl_cffi with retry logic.
         Returns response object if status 200, otherwise None.
@@ -68,15 +77,15 @@ class BaseSpider(Spider):
             try:
                 response = requests.get(
                     url,
-                    headers=self.headers,
+                    headers=headers or self.headers,
                     impersonate="chrome",
                     proxies=self.proxies,
-                    timeout=timeout,
+                    timeout=timeout
                 )
 
                 print(f"Attempt {attempt} → Status: {response.status_code} | {url}")
 
-                if response.status_code == 200:
+                if response.status_code == 200 or response.status_code == 404:
                     return response
 
             except Exception as e:
@@ -123,14 +132,15 @@ class BaseSpider(Spider):
                 "notes": item["notes"] if item["notes"] else None
             }
 
-            products_map[(base_url, item["product_title"])].append(variant)
+            products_map[(base_url, item["product_title"], item["product_id"])].append(variant)
 
         products = []
 
-        for (product_url, product_title), variants in products_map.items():
+        for (product_url, product_title, product_id), variants in products_map.items():
             products.append({
                 "product_url": product_url,
                 "product_title": product_title,
+                "product_id": product_id,
                 "variants": variants
             })
 
@@ -151,6 +161,9 @@ class BaseSpider(Spider):
         # store results for email
         self.summary_data = result
 
+        self.write_data_into_json_file(result)
+
+    def write_data_into_json_file(self, result):
         # to ensure that all  directories are exists
         os.makedirs(os.path.dirname(self.output_filename), exist_ok=True)
 
@@ -169,18 +182,18 @@ class BaseSpider(Spider):
         except:
             return None
 
-    def read_csv_file(self):
+    def read_csv_file(self, filename):
         try:
-            with open(self.mpb_notes_filename, mode='r', encoding='utf-8') as csv_file:
+            with open(filename, mode='r', encoding='utf-8') as csv_file:
                 return list(csv.DictReader(csv_file))
-        except:
+        except Exception as e:
             return []
 
-    def write_item_into_csv_file(self, item):
+    def write_item_into_csv_file(self, filename, item):
         # to ensure that all  directories are exists
         fieldnames = item.keys()
 
-        with open(self.mpb_notes_filename, mode='a', newline='', encoding='utf-8') as csvfile:
+        with open(filename, mode='a', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
             if csvfile.tell() == 0:
